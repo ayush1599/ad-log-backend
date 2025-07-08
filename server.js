@@ -6,6 +6,7 @@ import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 const parser = new Parser();
@@ -36,6 +37,11 @@ let cache = {
   timestamp: 0,
   lastFetchDate: null
 };
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 // Function to fetch RSS feeds
 async function fetchRSSFeeds() {
@@ -149,9 +155,19 @@ app.get('/api/news', async (req, res) => {
 });
 
 app.post('/api/summarize', async (req, res) => {
-  const { text } = req.body;
-  if (!text) return res.status(400).json({ error: 'Missing text' });
+  const { text, article_id } = req.body;
+  if (!text || !article_id) return res.status(400).json({ error: 'Missing text or article_id' });
   try {
+    // 1. Check Supabase for cached summary
+    const { data: cached, error: cacheErr } = await supabase
+      .from('article_summaries')
+      .select('summary')
+      .eq('article_id', article_id)
+      .single();
+    if (cached && cached.summary) {
+      return res.json({ summary: cached.summary, cached: true });
+    }
+    // 2. Generate summary
     const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -176,7 +192,9 @@ app.post('/api/summarize', async (req, res) => {
       const items = summaryRaw.split(/\n+/).map(line => line.replace(/^\s*-\s*/, '').trim()).filter(Boolean);
       summary = `<ul style="padding-left:1.5em;list-style:disc;">` + items.map(item => `<li>${item}</li>`).join('') + `</ul>`;
     }
-    res.json({ summary });
+    // 3. Save to Supabase
+    await supabase.from('article_summaries').upsert({ article_id, summary });
+    res.json({ summary, cached: false });
   } catch (err) {
     res.status(500).json({ error: 'Failed to summarize', details: err.message });
   }
